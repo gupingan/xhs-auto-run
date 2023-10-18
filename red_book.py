@@ -10,7 +10,7 @@ import requests
 from settings import Settings
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, QMimeData, QObject, pyqtSignal
+from PyQt5.QtCore import Qt, QMimeData, QObject, pyqtSignal, QTimer
 from PyQt5.QtGui import QPixmap, QIcon, QTextCharFormat, QTextCursor
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout, QRadioButton, QGroupBox, QPushButton,
                              QSpinBox, QLineEdit, QHBoxLayout, QSpacerItem, QSizePolicy, QListWidget,
@@ -46,10 +46,12 @@ class Browser:
         self.category_key = category_key
         self.name = None  # 浏览器实例名字
         self.create_time = datetime.datetime.now().time()  # 实例创建时间
-        self.limit = limit  # 任务数量最大限制
+        self.max_limit = limit  # 任务数量最大限制
         self.__base_url = 'https://www.xiaohongshu.com/'  # 小红书基本网址
         self.view: MainWindow = view  # view层穿透，便于交互
         self.comment_path = comment_path  # 评论话术文件的路径地址
+        self.finish_task_urls = []
+        self.last_task_urls = []  # 上次任务地址列表
         self.task_urls = []  # 任务地址列表
         self.current_comment_url = ''  # 当前评论的地址
         self.current_comment = ''  # 当前评论的内容
@@ -241,7 +243,7 @@ class Browser:
         except NoSuchElementException:
             self.__filter(key)
 
-    def __get_current_page_links(self):
+    def __get_current_page_links(self, limit):
         """
        获取当前页面的合法链接（单页未滚动）
        然后将连接存入require_comment_urls
@@ -250,7 +252,7 @@ class Browser:
         sections = self.driver.find_elements(By.XPATH, '//section[@class="note-item"]')
         logger.debug(sections)
         for section in sections:
-            if len(self.task_urls) == self.limit:
+            if len(self.task_urls) == limit:
                 break
             try:
                 url = section.find_element(By.TAG_NAME, 'a').get_attribute('href')
@@ -259,29 +261,29 @@ class Browser:
             except NoSuchElementException:
                 pass
 
-    def __collect_urls(self):
+    def __collect_urls(self, limit=None):
         """
         滚动页面，利用__get_current_page_links方法抓取
         同时统计链接的数量，最终数量小于任务目标量时也做了处理
         """
+        limit = limit or self.max_limit
         self.driver.maximize_window()
-
         time.sleep(1)
         self.__add_text_signal.signal.emit(f"{self.__now_time()}  线程{self.name}提示：开始统计链接抓取数量")
         logger.info(
             f'Thread {self.name} notification: Initiate the count of collected link quantity.')
-        while len(self.task_urls) != self.limit:
+        while len(self.task_urls) != limit:
             if self.__pause:
                 self.__add_text_signal.signal.emit(f"{self.__now_time()}  线程{self.name}提示：暂停中...")
             while self.__pause:
                 time.sleep(1)
-            self.__get_current_page_links()
+            self.__get_current_page_links(limit)
             time.sleep(1)
             self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             try:
                 self.driver.find_element(By.XPATH, '//div[@class="end-container"]')
                 self.__add_text_signal.signal.emit(
-                    f"{self.__now_time()}  线程{self.name}提示：已经到底啦，链接数量貌似不足 {self.limit} 哦")
+                    f"{self.__now_time()}  线程{self.name}提示：已经到底啦，链接数量貌似不足 {self.max_limit} 哦")
                 break
             except NoSuchElementException:
                 pass
@@ -290,6 +292,16 @@ class Browser:
         logger.info(
             f'Thread {self.name} notification: The current number of links is {len(self.task_urls)}.')
         self.driver.minimize_window()
+
+    def __image_after_video(self):
+        self.__classify("图文")  # 分类
+        time.sleep(1)
+        self.__collect_urls(self.max_limit // 2)  # 图文收集链接
+        self.__back_top()  # 回到顶部
+        time.sleep(1)
+        self.__classify("视频")  # 分类
+        time.sleep(1)
+        self.__collect_urls()  # 收集视频链接
 
     def __like(self):
         """
@@ -436,11 +448,11 @@ class Browser:
             self.__add_text_signal.signal.emit(f"{self.__now_time()}  线程{self.name}提示：评论已被屏蔽")
             return True
         elif comment_status == -2:
-            self.__add_text_signal.signal.emit(f"{self.__now_time()}  线程{self.name}提示：评论失败")
+            self.__add_text_signal.signal.emit(f"{self.__now_time()}  线程{self.name}提示：未知原因导致评论已被屏蔽")
             return True
         else:
             self.__add_text_signal.signal.emit(
-                f"{self.__now_time()}  线程{self.name}提示：评论了 {comment}")
+                f"{self.__now_time()}  线程{self.name}提示：评论成功！内容：{comment}")
             return False
 
     def __task_execution(self, require_comment_urls):
@@ -450,17 +462,18 @@ class Browser:
         if self.__is_comment:
             self.comments_list = self.file2list(self.comment_path)
         for index, url in enumerate(require_comment_urls):
+            index = index + 1
+            self.current_index = index
             self.__add_text_signal.signal.emit(
-                f"{self.__now_time()}  线程{self.name}提示：操作第{index + 1}个任务中 url> {url}")
+                f"{self.__now_time()}  线程{self.name}提示：操作第{index}个任务中 url> {url}")
             logger.info(
-                f'Thread {self.name} notification: Operating on the url in the {index + 1}th task: \n\t\t{url}')
+                f'Thread {self.name} notification: Operating on the url in the {index}th task')
 
             if self.__pause:
                 self.__add_text_signal.signal.emit(f"{self.__now_time()}  线程{self.name}提示：暂停中...")
             while self.__pause:
                 time.sleep(1)
             self.current_comment_url = url
-            self.current_index = index + 1
             self.open(url=url)
             time.sleep(1)
             self.current_comment = random.choice(self.comments_list) + self.__get_rare_word()
@@ -477,24 +490,25 @@ class Browser:
                 self.__sleep()
                 if self.__is_skip_collect and self.__get_collect_status()[1]:
                     self.__add_text_signal.signal.emit(
-                        f"{self.__now_time()}  线程{self.name}提示：第{index + 1}个任务已跳过")
+                        f"{self.__now_time()}  线程{self.name}提示：第{index}个任务已跳过")
                     continue
                 self.__comment(speech=self.current_comment)
                 if self.__is_check_shield:  # 是否检查屏蔽
                     self.__sleep()
-                    # 如果已经屏蔽 并且 需要重试
-                    if self.__check_shield(url, self.current_comment) and self.__is_shield_retry:
+                    # 如果已经屏蔽
+                    if self.__check_shield(url, self.current_comment):
                         self.failure_comment_count += 1
-                        self.__sleep()  # 缓冲一下
-                        for _ in range(self.__shield_retry_count):  # 尝试重试 最大次数 __shield_retry_count
-                            self.current_comment = random.choice(self.comments_list) + self.__get_rare_word()
-                            self.__comment(speech=self.current_comment)
-                            self.__sleep()
-                            if not self.__check_shield(url, self.current_comment):
-                                self.failure_comment_count -= 1
-                                self.success_comment_count += 1
-                                # 当检查到没有被屏蔽后，跳出循环，不再重试
-                                break
+                        if self.__is_shield_retry:  # 如果需要重试
+                            self.__sleep()  # 缓冲一下
+                            for _ in range(self.__shield_retry_count):  # 尝试重试 最大次数 __shield_retry_count
+                                self.current_comment = random.choice(self.comments_list) + self.__get_rare_word()
+                                self.__comment(speech=self.current_comment)
+                                self.__sleep()
+                                if not self.__check_shield(url, self.current_comment):
+                                    self.failure_comment_count -= 1
+                                    self.success_comment_count += 1
+                                    # 当检查到没有被屏蔽后，跳出循环，不再重试
+                                    break
                     else:
                         self.success_comment_count += 1
                 else:
@@ -507,51 +521,48 @@ class Browser:
                 self.__sleep()
                 self.__collect()
 
-            self.__add_text_signal.signal.emit(f"{self.__now_time()}  线程{self.name}提示：第{index + 1}个任务已完成")
+            self.__add_text_signal.signal.emit(
+                f"{self.__now_time()}  线程{self.name}提示：第{index}个任务已完成")
+
+    def __occur_new(self):
+        return len(set(self.last_task_urls) & set(self.task_urls)) != len(self.task_urls)
 
     def __login_after(self, filter_key, keyword):
         """
-        非循环模式下 登录后的具体操作
+        登录后的具体操作
         :param filter_key: 过滤关键词
         :param keyword: 搜索关键词
         """
         try:
-            collect_before_length = len(self.task_urls)
+            self.finish_task_urls.extend(self.task_urls.copy())
+            self.last_task_urls = self.task_urls.copy()
+            self.task_urls.clear()
             self.__search(keyword)  # 开始搜索
             time.sleep(3)
             self.__filter(filter_key)  # 筛选
             if self.category_key == "先图文后视频":
-                self.__classify("图文")  # 分类
-                time.sleep(1)
-                self.__collect_urls()  # 收集链接
-                self.__back_top()  # 回到顶部
-                self.limit *= 2
-                time.sleep(1)
-                self.__classify("视频")  # 分类
-                time.sleep(1)
-                self.__collect_urls()  # 收集链接
+                self.__image_after_video()
             else:
-                self.__classify(self.category_key)  # 分类
+                self.__classify(self.category_key)  # 按照关键字分类
                 time.sleep(1)
                 self.__collect_urls()  # 收集链接
             time.sleep(1)
             logger.info(f"Thread {self.name} notification: Task List\n{self.task_urls}")
-            collect_after_length = len(self.task_urls)
-            if collect_after_length > collect_before_length:
-                if self.__is_cyclic_mode:
-                    self.__task_execution(self.task_urls[collect_before_length:])
+            if self.__is_cyclic_mode:
+                if self.__occur_new():
+                    temp_urls = []
+                    for url in self.task_urls:
+                        if url not in self.finish_task_urls:
+                            temp_urls.append(url)
+                    self.__task_execution(temp_urls)
                 else:
-                    self.__task_execution(self.task_urls)
-            else:
-                if self.__is_cyclic_mode:
                     self.__add_text_signal.signal.emit(
                         f"{self.__now_time()}  线程{self.name}提示：任务列表没有变化，{self.__interval_minute}分钟后再去工作")
                     logger.info(
                         f"Thread {self.name} notification: The task list has not changed. Please return to work in {self.__interval_minute} minutes.")
-                    time.sleep(self.__interval_minute * 60)  # 半小时后 再去工作
-                else:
-                    self.__add_text_signal.signal.emit(f"{self.__now_time()}  线程{self.name}提示：任务列表没有变化")
-                    logger.info(f"Thread {self.name} notification: The task list has not changed.")
+                    time.sleep(self.__interval_minute * 60)  # __interval_minute分钟后 再去工作
+            else:
+                self.__task_execution(self.task_urls)
             return True
         except NoSuchWindowException:
             self.driver.service.stop()
@@ -655,6 +666,10 @@ class MainWindow(BaseWidget):
         logger.info("Load configurator.")
         super().__init__(self.settings.get('SoftwareConfig', 'title'))
         self.setWindowIcon(QIcon(self.settings.get('SoftwareConfig', 'icon')))
+        self.timer = QTimer()
+        self.timer.setInterval(1000)
+        self.timer.setTimerType(Qt.CoarseTimer)
+        self.timer.timeout.connect(self.update_thread_information)
         self.current_time = None
         self.selected_comment_file_path = None
         self.selected_search_file_path = None
@@ -754,6 +769,7 @@ class MainWindow(BaseWidget):
         self.dynamic_monitor_layout.addLayout(self.dynamic_monitor_title)
         self.dynamic_monitor_text = QTextEdit()
         self.dynamic_monitor_text.setReadOnly(True)
+        self.dynamic_monitor_text.setLineWrapMode(QTextEdit.NoWrap)
         self.dynamic_monitor_text.setMinimumSize(600, 500)
         self.dynamic_monitor_layout.addWidget(self.dynamic_monitor_text)
         self.monitor_layout.addWidget(self.fixed_monitor_label)
@@ -805,8 +821,10 @@ class MainWindow(BaseWidget):
         self.task_limit_layout.addWidget(self.task_limit_spinbox)
         self.target1_h_layout = QHBoxLayout()
         self.is_cyclic_mode = QCheckBox("循环模式")
-        self.loop_interval_minute_label = QLabel("间隔时间(分钟)")
+        self.loop_interval_minute_label = QLabel("等待时间(分钟)")
+        self.loop_interval_minute_label.setToolTip("循环后如果没有变化，等待相应时间重新检查")
         self.loop_interval_minute = QSpinBox()
+        self.loop_interval_minute.setToolTip("最小1分钟，最大10080分钟")
         self.loop_interval_minute.setRange(1, 10080)  # 限制为1~10080之间的数字 7天
         self.target1_h_layout.addWidget(self.is_cyclic_mode)
         self.target1_h_layout.addWidget(self.loop_interval_minute_label)
@@ -824,7 +842,9 @@ class MainWindow(BaseWidget):
         self.target3_h_layout = QHBoxLayout()
         self.is_comment = QCheckBox("是否评论")
         self.is_skip_collect = QCheckBox("跳过已收藏")
+        self.is_skip_collect.setToolTip("遇到已收藏的会跳过不评论")
         self.is_again_comment_collect = QCheckBox("再评论再收藏")
+        self.is_again_comment_collect.setToolTip("遇到已收藏的取消收藏，再评论，再收藏")
         self.target3_h_layout.addWidget(self.is_comment)
         self.target3_h_layout.addWidget(self.is_skip_collect)
         self.target3_h_layout.addWidget(self.is_again_comment_collect)
@@ -832,9 +852,11 @@ class MainWindow(BaseWidget):
         self.task_limit_layout.addLayout(self.target3_h_layout)
         self.target4_h_layout = QHBoxLayout()
         self.is_random_rare_word = QCheckBox("随机生僻字")
+        self.is_random_rare_word.setToolTip("将指定数量的生僻字增加到评论末尾")
         self.rare_word_h_layout = QHBoxLayout()
         self.rare_word_label = QLabel("数量")
         self.rare_word_spinbox = QSpinBox()
+        self.rare_word_spinbox.setToolTip("最短1个，最长20个")
         self.rare_word_spinbox.setRange(1, 20)  # 限制为1~20之间的数字
         self.rare_word_h_layout.addWidget(self.rare_word_label)
         self.rare_word_h_layout.addWidget(self.rare_word_spinbox)
@@ -844,8 +866,11 @@ class MainWindow(BaseWidget):
         self.task_limit_layout.addLayout(self.target4_h_layout)
         self.target5_h_layout = QHBoxLayout()
         self.is_check_shield = QCheckBox("检查屏蔽")
+        self.is_check_shield.setToolTip("不仅仅检查屏蔽，只要评论不成功都检查")
         self.is_shield_retry = QCheckBox("屏蔽后重试")
+        self.is_shield_retry.setToolTip("只要是评论失败，勾选后会自动重试")
         self.shield_retry_count = QSpinBox()
+        self.shield_retry_count.setToolTip("最低1次，最高10次")
         self.shield_retry_count.setRange(1, 10)  # 限制为1~10之间的数字
         self.target5_h_layout.addWidget(self.is_check_shield)
         self.target5_h_layout.addWidget(self.is_shield_retry)
@@ -857,9 +882,12 @@ class MainWindow(BaseWidget):
         self.time_group = QGroupBox("时间设置")
         self.time_layout = QVBoxLayout()
         self.interval_label = QLabel("设置任务间隔时间（秒） - 最大300秒")
+        self.interval_label.setToolTip("点赞、评论等操作之间的间隔时间，并不绝对，时间近似")
         self.task_interval_second = QSpinBox()
+        self.task_interval_second.setToolTip("最小1秒，最大300秒")
         self.task_interval_second.setRange(1, 300)  # 限制为1~300之间的数字
         self.is_random_interval = QCheckBox("间隔时间随机")
+        self.is_random_interval.setToolTip("勾选后，将以上方时间为最大值进行随机给时")
         self.btn_open_comment_file = QPushButton("请选择评论文案")
         self.time_layout.addWidget(self.interval_label)
         self.time_layout.addWidget(self.task_interval_second)
@@ -869,8 +897,11 @@ class MainWindow(BaseWidget):
 
         self.btn_h_layout = QHBoxLayout()
         self.run_button = QPushButton("Start")
+        self.run_button.setToolTip("根据配置，生成浏览器进程")
         self.pause_button = QPushButton("暂停/恢复")
+        self.pause_button.setToolTip("当前任务单元无法暂停，但是可以从下一次暂停")
         self.save_button = QPushButton("保存配置")
+        self.save_button.setToolTip("上述所有参数可以保存，下次就无需再配置")
         self.btn_h_layout.addWidget(self.run_button)
         self.btn_h_layout.addWidget(self.pause_button)
         self.btn_h_layout.addWidget(self.save_button)
@@ -1098,6 +1129,7 @@ class MainWindow(BaseWidget):
         self.browsers_list.clicked.connect(self.update_thread_information)
         self.add_text_signal = AddTextSignal()
         self.add_text_signal.signal.connect(self.append_dynamic_log)
+        self.dynamic_monitor_text.verticalScrollBar().rangeChanged.connect(self.dynamic_log_scroll)
 
     def start_automation(self):
         """
@@ -1167,10 +1199,11 @@ class MainWindow(BaseWidget):
         self.threads[-1].setdefault("time", now_time)
         self.load_thread_items()
         time.sleep(1)
-        monitor = threading.Thread(
-            target=self.start_thread_monitoring,
-            daemon=True)
-        monitor.start()
+        self.timer.start()
+        # monitor = threading.Thread(
+        #     target=self.start_thread_monitoring,
+        #     daemon=True)
+        # monitor.start()
         logger.info('<msg_monitor> Thread started!')
 
     def pause_thread(self):
@@ -1304,6 +1337,7 @@ class MainWindow(BaseWidget):
                           is_append_rare_word=is_append_rare_word, rare_words_num=rare_words_num,
                           category_key=category_key)
         self.threads[-1].setdefault("browser", browser)
+        logger.info(f'The Params of browser are {browser.__dict__}')
         logger.info('Creating a browser and executing automation.')
         browser.start(self.is_use_multiple_file.isChecked(), keyword, filter_key)
 
@@ -1325,6 +1359,7 @@ class MainWindow(BaseWidget):
         监视当前选中的线程实例的状态，并在界面上显示相关信息，如运行时间、浏览器的评论 URL、当前评论内容和任务进度等信息
         :return:
         """
+        self.current_time = datetime.datetime.now().time()
         index = self.browsers_list.currentIndex().row()
         thread = self.threads[index].get('thread')
         try:
@@ -1342,8 +1377,8 @@ class MainWindow(BaseWidget):
             else:
                 self.working_time_label.setStyleSheet("color: #FF0000;")
 
-            self.progress1_label.setText(f"{len(browser.task_urls)} / {browser.limit}")
-            self.progress2_label.setText(f"{browser.current_index} / {browser.limit}")
+            self.progress1_label.setText(f"{len(browser.task_urls)} / {browser.max_limit}")
+            self.progress2_label.setText(f"{browser.current_index} / {browser.max_limit}")
             self.success_comment_label.setText(f"{browser.success_comment_count}")
             self.failure_comment_label.setText(f"{browser.failure_comment_count}")
         except Exception as e:
@@ -1355,18 +1390,6 @@ class MainWindow(BaseWidget):
             self.thread_status_label.setStyleSheet(
                 "color: #007AFF;" if thread.is_alive() else "color: #FF0000;")
         self.create_time_label.setText(self.threads[index].get('time', '创建时间显示异常'))
-
-    def start_thread_monitoring(self):
-        """
-        线程启动监视系统，每秒钟轮询一次当前选中的线程实例，调用 show_msg 方法显示状态信息
-        :return:
-        """
-        logger.info(
-            'The monitoring system with a one-second polling interval has been activated.')
-        while True:
-            self.current_time = datetime.datetime.now().time()
-            time.sleep(2)
-            self.update_thread_information()
 
     def toggle_interval_mode(self):
         """
@@ -1486,6 +1509,7 @@ class MainWindow(BaseWidget):
         return _format
 
     def append_dynamic_log(self, output):
+        self.before_value = self.dynamic_monitor_text.verticalScrollBar().maximum()
         dmt_cursor = QTextCursor(self.dynamic_monitor_text.document())
         dmt_cursor.movePosition(QTextCursor.End)
         start_index = output.find("评论已被屏蔽")
@@ -1494,8 +1518,22 @@ class MainWindow(BaseWidget):
             dmt_cursor.insertText("评论已被屏蔽", self.get_format(Qt.red))  # 设置红色样式
             output = output[start_index + 6:]
             start_index = output.find("评论已被屏蔽")
+        success_index = output.find("评论成功！")
+        while success_index != -1:
+            dmt_cursor.insertText(output[:success_index], self.get_format(Qt.black))  # 设置黑色样式
+            dmt_cursor.insertText("评论成功！", self.get_format(Qt.green))  # 设置绿色样式
+            output = output[success_index + 5:]
+            success_index = output.find("评论成功！")
         dmt_cursor.insertText(output, self.get_format(Qt.black))  # 设置黑色样式
         dmt_cursor.insertBlock()
+        self.after_value = self.dynamic_monitor_text.verticalScrollBar().maximum()
+
+    def dynamic_log_scroll(self, min_, max_):
+        current_value = self.dynamic_monitor_text.verticalScrollBar().value()
+        if self.before_value <= current_value <= self.after_value:
+            self.dynamic_monitor_text.verticalScrollBar().setValue(max_)
+        else:
+            self.dynamic_monitor_text.verticalScrollBar().setValue(current_value)
 
     def clear_dynamic_log(self):
         self.dynamic_monitor_text.clear()
@@ -1506,6 +1544,7 @@ class MainWindow(BaseWidget):
         关闭应用程序前会关闭所有已经创建的浏览器实例
         :return:
         """
+        self.timer.stop()
         for thread in self.threads:
             browser = thread.get("browser")
             if browser:

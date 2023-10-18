@@ -20,7 +20,7 @@ if sys.platform == "win32":
 
 setup(
     name="小红书自动跑",
-    version="2.0",
+    version="3.0",
     description="The author of this piece is Qin Yu.",
     options={
         "build_exe": {
