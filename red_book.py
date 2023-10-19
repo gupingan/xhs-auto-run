@@ -55,10 +55,11 @@ class Browser:
         self.task_urls = []  # 任务地址列表
         self.current_comment_url = ''  # 当前评论的地址
         self.current_comment = ''  # 当前评论的内容
+        self.current_index = 0  # 当前正在处理的任务的序号
+        self.current_page_source = ""  # 当前正常处理页面的html
         self.comments_list = [""]  # 评论的列表，源于评论话术文件
         self.success_comment_count = "--等待中--"
         self.failure_comment_count = "--等待中--"
-        self.current_index = 0  # 当前正在处理的任务的序号
         self.driver = self.__chrome()  # webdriver-Chrome
         self.wait = WebDriverWait(self.driver, 100)  # webdriver等待器
         self.__pause = False  # 标志是否暂停浏览器操作的状态
@@ -293,6 +294,13 @@ class Browser:
             f'Thread {self.name} notification: The current number of links is {len(self.task_urls)}.')
         self.driver.minimize_window()
 
+    def __is_invalid_url(self):
+        time.sleep(1)
+        pattern = re.compile(re.escape("当前内容无法展示"))
+        if pattern.search(self.current_page_source):
+            return True
+        return False
+
     def __image_after_video(self):
         self.__classify("图文")  # 分类
         time.sleep(1)
@@ -307,19 +315,27 @@ class Browser:
         """
         点赞操作
         """
-        logger.info(f'Thread {self.name} notification: Click to like.')
-        self.__add_text_signal.signal.emit(f"{self.__now_time()}  线程{self.name}提示：开始点爱心")
-        like = self.driver.find_element(By.XPATH, '//*[@id="noteContainer"]/div[3]/div[3]/div[1]/div[1]/span[1]')
-        is_liked = like.find_element(By.TAG_NAME, 'use').get_attribute("xlink:href") == "#liked"
-        if not is_liked:
-            like.click()
-            self.__add_text_signal.signal.emit(f"{self.__now_time()}  线程{self.name}提示：结束点爱心")
-        else:
-            self.__add_text_signal.signal.emit(f"{self.__now_time()}  线程{self.name}提示：已经点过爱心了")
+        try:
+            logger.info(f'Thread {self.name} notification: Click to like.')
+            self.__add_text_signal.signal.emit(f"{self.__now_time()}  线程{self.name}提示：开始点爱心")
+            like = self.driver.find_element(By.XPATH, '//*[@id="noteContainer"]/div[3]/div[3]/div[1]/div[1]/span[1]')
+            is_liked = like.find_element(By.TAG_NAME, 'use').get_attribute("xlink:href") == "#liked"
+            if not is_liked:
+                like.click()
+                self.__add_text_signal.signal.emit(f"{self.__now_time()}  线程{self.name}提示：结束点爱心")
+            else:
+                self.__add_text_signal.signal.emit(f"{self.__now_time()}  线程{self.name}提示：已经点过爱心了")
+        except Exception as e:
+            logger.error(f"Thread {self.name} notification: {e}")
 
     def __get_collect_status(self):
-        collect = self.driver.find_element(By.XPATH, '//span[@class="collect-wrapper"]')
-        is_collected = collect.find_element(By.TAG_NAME, 'use').get_attribute("xlink:href") == "#collected"
+        try:
+            collect = self.driver.find_element(By.XPATH, '//span[@class="collect-wrapper"]')
+            is_collected = collect.find_element(By.TAG_NAME, 'use').get_attribute("xlink:href") == "#collected"
+        except Exception as e:
+            logger.error(f"Thread {self.name} notification: {e}")
+            collect = None
+            is_collected = None
         return collect, is_collected
 
     def __collect(self):
@@ -370,19 +386,20 @@ class Browser:
         评论操作
         :param speech: 评论内容
         """
-        time.sleep(1)
-        comment_input = self.driver.find_element(By.XPATH, '//input[@class="comment-input"]')
-        if comment_input.get_attribute("value"):
-            comment_input.clear()
-        comment_input.send_keys(speech)
-        logger.info(f'Thread {self.name} notification: Sending a comment to the window.')
-        time.sleep(1)
-        comment_btn = self.driver.find_element(By.XPATH, '//button[@class="submit"]')
-        logger.info(f'Thread {self.name} notification: Preparing to click on the comment button.')
-        # comment_btn.click()  # 该点击在最小化时导致不可交互，应当用javascript模拟点击事件
-        self.driver.execute_script("arguments[0].click();", comment_btn)
-        logger.info(f'Thread {self.name} notification: commented on: \n\t\t{speech}')
-        time.sleep(1)
+        try:
+            time.sleep(1)
+            comment_input = self.driver.find_element(By.XPATH, '//input[@class="comment-input"]')
+            if comment_input.get_attribute("value"):
+                comment_input.clear()
+            comment_input.send_keys(speech)
+            logger.info(f'Thread {self.name} notification: Sending a comment to the window.')
+            time.sleep(1)
+            comment_btn = self.driver.find_element(By.XPATH, '//button[@class="submit"]')
+            logger.info(f'Thread {self.name} notification: Preparing to click on the comment button.')
+            self.driver.execute_script("arguments[0].click();", comment_btn)
+            logger.info(f'Thread {self.name} notification: commented on: \n\t\t{speech}')
+        except Exception as e:
+            logger.error(f"Thread {self.name} notification: {e}")
 
     def __back_top(self):
         try:
@@ -476,7 +493,13 @@ class Browser:
             self.current_comment_url = url
             self.open(url=url)
             time.sleep(1)
+            self.current_page_source = self.driver.page_source
             self.current_comment = random.choice(self.comments_list) + self.__get_rare_word()
+            if self.__is_invalid_url():
+                self.__add_text_signal.signal.emit(
+                    f"{self.__now_time()}  线程{self.name}提示：该任务的地址无效，进行跳过")
+                logger.info(f'Thread {self.name} notification: The address of this task is invalid.')
+                continue
             if self.__is_like:
                 self.__sleep()
                 self.__like()
@@ -491,29 +514,29 @@ class Browser:
                 if self.__is_skip_collect and self.__get_collect_status()[1]:
                     self.__add_text_signal.signal.emit(
                         f"{self.__now_time()}  线程{self.name}提示：第{index}个任务已跳过")
-                    continue
-                self.__comment(speech=self.current_comment)
-                if self.__is_check_shield:  # 是否检查屏蔽
-                    self.__sleep()
-                    # 如果已经屏蔽
-                    if self.__check_shield(url, self.current_comment):
-                        self.failure_comment_count += 1
-                        if self.__is_shield_retry:  # 如果需要重试
-                            self.__sleep()  # 缓冲一下
-                            for _ in range(self.__shield_retry_count):  # 尝试重试 最大次数 __shield_retry_count
-                                self.current_comment = random.choice(self.comments_list) + self.__get_rare_word()
-                                self.__comment(speech=self.current_comment)
-                                self.__sleep()
-                                if not self.__check_shield(url, self.current_comment):
-                                    self.failure_comment_count -= 1
-                                    self.success_comment_count += 1
-                                    # 当检查到没有被屏蔽后，跳出循环，不再重试
-                                    break
-                    else:
-                        self.success_comment_count += 1
                 else:
-                    self.success_comment_count = "未开启屏蔽检测"
-                    self.failure_comment_count = "未开启屏蔽检测"
+                    self.__comment(speech=self.current_comment)
+                    if self.__is_check_shield:  # 是否检查屏蔽
+                        self.__sleep()
+                        # 如果已经屏蔽
+                        if self.__check_shield(url, self.current_comment):
+                            self.failure_comment_count += 1
+                            if self.__is_shield_retry:  # 如果需要重试
+                                self.__sleep()  # 缓冲一下
+                                for _ in range(self.__shield_retry_count):  # 尝试重试 最大次数 __shield_retry_count
+                                    self.current_comment = random.choice(self.comments_list) + self.__get_rare_word()
+                                    self.__comment(speech=self.current_comment)
+                                    self.__sleep()
+                                    if not self.__check_shield(url, self.current_comment):
+                                        self.failure_comment_count -= 1
+                                        self.success_comment_count += 1
+                                        # 当检查到没有被屏蔽后，跳出循环，不再重试
+                                        break
+                        else:
+                            self.success_comment_count += 1
+                    else:
+                        self.success_comment_count = "未开启屏蔽检测"
+                        self.failure_comment_count = "未开启屏蔽检测"
             else:
                 self.success_comment_count = "未开启评论"
                 self.failure_comment_count = "未开启评论"
